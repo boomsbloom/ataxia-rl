@@ -1,0 +1,111 @@
+---
+title: "Run Hybrid Stats"
+output: html_document
+params:
+  basedir:
+    value: x
+---
+
+```{r, include=FALSE, eval=TRUE}
+library(reticulate)
+library(rstan)
+library(loo)
+library(tibble)
+library(lme4)
+library(lmerTest)
+library(rstanarm)
+options(MC.cores=parallel::detectCores())
+```
+
+```{python, include=FALSE, eval=TRUE}
+import os, pickle
+import pandas as pd
+import numpy as np
+import seaborn as sns
+```
+
+```{r}
+basedir = params$basedir
+basedir = paste(basedir,"/",sep="")
+outdir = sprintf("%scode/fit_models/hybrid/summarized/",basedir)
+```
+
+# Run Stats on Behavior
+---
+
+## Load dataframes needed for stats
+
+```{python}
+ccas = pd.read_csv("%sdata/ccasRmScored.csv"%r.basedir)
+lrd = pd.read_csv("%sdata/hybrid/lrdData4Stats.csv"%r.basedir)
+dprime = pd.read_csv("%sdata/hybrid/dprimeData4Stats.csv"%r.basedir)
+ccas = ccas.merge(rmdata.groupby(["subject_id","patient_factor","group_coded"]).size().reset_index(name="count"),on=["subject_id"]).drop("count",axis=1)
+ccas["ds_bwd"] = ccas["8_digitspan_bwd"]
+ccas["ds_fwd"] = ccas["1_digitspan_fwd"]
+lrd = lrd.merge(ccas[["subject_id","ds_bwd","ds_fwd"]],on=["subject_id"])
+dprime = dprime.merge(ccas[["subject_id","ds_bwd","ds_fwd"]],on=["subject_id"])
+```
+
+# LM for p choose lucky ~ trials around reversal
+```{r}
+py$lrd["ds_bwd"] = as.vector(scale(py$lrd$ds_bwd))
+lrd_m = stan_glmer(lucky_chosen ~ t_m3:group_coded + t_m2:group_coded + t_m1:group_coded + t_0:group_coded + t_1:group_coded + t_2:group_coded + t_3:group_coded + ds_bwd + (t_m3:group_coded + t_m2:group_coded + t_m1:group_coded + t_0:group_coded + t_1:group_coded + t_2:group_coded + t_3:group_coded | ctrl_patient_id), data = py$lrd, family = binomial, cores=4)
+lrd_table = data.frame(summary(lrd_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+lrd_table = r.lrd_table
+lrd_table["effect"] = lrd_table.index
+lrd_table.to_csv(os.path.join(r.outdir,"lrd_stat_effects.csv"))
+```
+
+# LM for recognition memory (d prime)
+```{r}
+py$dprime["ds_bwd"] = as.vector(scale(py$dprime$ds_bwd))
+dprime_m = stan_glmer(dprime ~ group_coded + ds_bwd + (group_coded | ctrl_patient_id), data = py$dprime, cores=4)
+dprime_table = data.frame(summary(dprime_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+dprime_table = r.dprime_table
+dprime_table["effect"] = dprime_table.index
+dprime_table.to_csv(os.path.join(r.outdir,"dprime_stat_effects.csv"))
+```
+
+# LM for grp effects on reaction time
+```{python}
+rtdata = pd.read_csv("%sdata/hybrid/rtData4Stats.csv"%r.basedir)
+```
+
+```{r}
+rt_m = stan_glmer(rt ~ group_coded + (group_coded | ctrl_patient_id), data = py$rtdata, cores=4)
+rt_table = data.frame(summary(rt_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+rt_table = r.rt_table
+rt_table["effect"] = rt_table.index
+rt_table.to_csv(os.path.join(r.outdir,"rt_stat_effects.csv"))
+```
+
+# LM for grp effects on model fit
+```{python}
+elpds = pd.read_csv("%scode/fit_models/hybrid/summarized/hybrid_elpd_diffs.csv"%r.basedir)
+ccas2 = ccas
+ccas2["subject_id"] = ccas2.subject_id.str.zfill(3)
+elpds = elpds.merge(ccas[["subject_id","ds_bwd","ds_fwd"]],on=["subject_id"])
+```
+
+```{r}
+py$elpds["ds_bwd"] = as.vector(scale(py$elpds$ds_bwd))
+elpd_m = stan_glmer(elpd_diff ~ group_coded + ds_bwd + (group_coded | patient_factor), data = py$elpds, cores=4)
+elpd_table = data.frame(summary(elpd_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+elpd_table = r.elpd_table
+elpd_table["effect"] = elpd_table.index
+elpd_table.to_csv(os.path.join(r.outdir,"elpd_stat_effects.csv") )
+```
+
+

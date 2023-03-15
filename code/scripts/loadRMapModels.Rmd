@@ -1,0 +1,334 @@
+---
+title: "Load RMap Models"
+output: html_document
+params:
+  basedir:
+    value: x
+---
+
+```{r, include=FALSE, eval=TRUE}
+library(reticulate)
+library(rstan)
+library(loo)
+library(tibble)
+library(lme4)
+library(lmerTest)
+library(rstanarm)
+```
+
+```{python, include=FALSE, eval=TRUE}
+import os, pickle, scipy
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+```
+
+# Want to load all single subject models and save out relevant dataframes for plotting
+This means: parameters & loo
+
+```{r}
+#basedir = params$basedir
+basedir = '/Users/jonathannicholas/gradschool/manuscripts/ataxia-rl'
+basedir = paste(basedir,"/",sep="")
+paramdir = sprintf("%scode/fit_models/rm/rl/ss/",basedir)
+outdir = sprintf("%scode/fit_models/rm/summarized/",basedir)
+```
+
+
+# Get mapping between controls and patients
+
+```{python}
+
+ctrl_fact_map = pd.read_csv(os.path.join(r.basedir,"data/controlMapData4Stan.csv"))[["subject_id","sub_factor"]]
+ctrl_fact_map = ctrl_fact_map.rename({"subject_id":"ctrl_subject_id"},axis=1)
+ctrl_fact_map = ctrl_fact_map.groupby(["ctrl_subject_id","sub_factor"]).size().reset_index(name="n_rows").reset_index(drop=True)
+pat_fact_map = pd.read_csv(os.path.join(r.basedir,"data/patientMapData4Stan.csv"))[["subject_id","sub_factor"]]
+pat_fact_map["subject_id"] = pat_fact_map.subject_id.astype("str").str.zfill(3)
+pat_fact_map = pat_fact_map.rename({"subject_id":"pat_subject_id"},axis=1)
+pat_fact_map = pat_fact_map.groupby(["pat_subject_id","sub_factor"]).size().reset_index(name="n_rows").reset_index(drop=True)
+
+ctrl_pat_map = pd.read_csv(os.path.join(r.basedir,"data/ctrl_pat_map.csv"))
+ctrl_pat_map["patient"] = ctrl_pat_map["patient"].astype("str").str.zfill(3)
+ctrl_pat_map = ctrl_pat_map.rename({"patient":"pat_subject_id","control":"ctrl_subject_id"},axis=1).reset_index(drop=True)
+
+id_mapper = pat_fact_map.merge(ctrl_pat_map,on=["pat_subject_id"]).drop("n_rows",axis=1)
+id_mapper = id_mapper.rename({"sub_factor":"pat_sub_factor"},axis=1)
+id_mapper = id_mapper.merge(ctrl_fact_map[["sub_factor","ctrl_subject_id"]],on="ctrl_subject_id")
+id_mapper = id_mapper.rename({"sub_factor":"ctrl_sub_factor"},axis=1)
+
+```
+
+# Load and save the fit model parameters for each subject
+
+```{r}
+rand_fit_params = data.frame()
+for (s in 1:17) {
+  f = readRDS(sprintf("%srand_ss_fit_pat_%s.rds",paramdir,s))
+  f_sum = as.data.frame(summary(f, pars = c("beta","post_pred"))$summary)
+  f_sum$sub_factor = s
+  f_sum$group = "PAT"
+  f_sum = cbind(param = rownames(f_sum), f_sum)
+  rand_fit_params = rbind(rand_fit_params,f_sum)
+
+}
+for (s in 1:51) {
+  f = readRDS(sprintf("%srand_ss_fit_ctrl_%s.rds",paramdir,s))
+  f_sum = as.data.frame(summary(f, pars = c("beta","post_pred"))$summary)
+  f_sum$sub_factor = s
+  f_sum$group = "CTRL"
+  f_sum = cbind(param = rownames(f_sum), f_sum)
+  rand_fit_params = rbind(rand_fit_params,f_sum)
+
+}
+
+rw_fit_params = data.frame()
+for (s in 1:17) {
+  f = readRDS(sprintf("%srw_ss_fit_pat_%s.rds",paramdir,s))
+  f_sum = as.data.frame(summary(f, pars = c("alpha","beta","post_pred"))$summary)
+  f_sum$sub_factor = s
+  f_sum$group = "PAT"
+  f_sum = cbind(param = rownames(f_sum), f_sum)
+  rw_fit_params = rbind(rw_fit_params,f_sum)
+
+}
+for (s in 1:51) {
+  f = readRDS(sprintf("%srw_ss_fit_ctrl_%s.rds",paramdir,s))
+  f_sum = as.data.frame(summary(f, pars = c("alpha","beta","post_pred"))$summary)
+  f_sum$sub_factor = s
+  f_sum$group = "CTRL"
+  f_sum = cbind(param = rownames(f_sum), f_sum)
+  rw_fit_params = rbind(rw_fit_params,f_sum)
+
+}
+
+rownames(rand_fit_params) <- 1:nrow(rand_fit_params)
+rownames(rw_fit_params) <- 1:nrow(rw_fit_params)
+
+
+```
+
+```{python}
+pat_rands = r.rand_fit_params[r.rand_fit_params.group == "PAT"]
+ctrl_rands = r.rand_fit_params[r.rand_fit_params.group == "CTRL"]
+pat_rws = r.rw_fit_params[r.rw_fit_params.group == "PAT"]
+ctrl_rws = r.rw_fit_params[r.rw_fit_params.group == "CTRL"]
+
+pat_rands.to_csv(os.path.join(r.outdir,"patient_random_model_params.csv"))
+ctrl_rands.to_csv(os.path.join(r.outdir,"ctrl_random_model_params.csv"))
+pat_rws.to_csv(os.path.join(r.outdir,"patient_rw_model_params.csv"))
+ctrl_rws.to_csv(os.path.join(r.outdir,"ctrl_rw_model_params.csv"))
+```
+
+# Run Stats on fit model parameters
+
+## Create dataframe for stats
+```{python}
+fit_params = r.rw_fit_params
+scored_ccas = pd.read_csv(os.path.join(r.basedir,"data/ccasRmScored.csv"))
+scored_ccas = scored_ccas.rename({"1_digitspan_fwd":"ds_fwd","8_digitspan_bwd":"ds_bwd"},axis=1)
+scored_ccas["group_coded"] = scored_ccas["group"].replace({"CTRL":-0.5,"PAT":0.5})
+scored_ccas["subject_id"] = scored_ccas.subject_id.str.zfill(3)
+
+fit_params["grp_factor"] = fit_params["group"]+"_"+fit_params["sub_factor"].astype("str")
+
+rhats = fit_params.groupby(["grp_factor","param"]).Rhat.mean().reset_index(name="Rhat")
+exclude_subjs = rhats[rhats.Rhat > 1.1].grp_factor.unique()
+to_exclude = []
+for s in exclude_subjs:
+  if "CTRL" in s:
+    rhats = rhats[rhats.grp_factor != s]
+    csubfactor = int(s.split("_")[-1])
+    to_exclude.append(id_mapper[id_mapper.ctrl_sub_factor == csubfactor].ctrl_subject_id.iloc[0])
+  elif "PAT" in s:
+    rhats = rhats[rhats.grp_factor != s]
+    psubfactor = int(s.split("_")[-1])
+    csubids = id_mapper[id_mapper.pat_sub_factor == psubfactor].ctrl_subject_id.unique()
+    to_exclude.append(id_mapper[id_mapper.pat_sub_factor == psubfactor].pat_subject_id.iloc[0])
+    to_exclude.extend(csubids)
+    
+pat_params = fit_params[fit_params.group == "PAT"]
+pat_params["pat_sub_factor"] = pat_params["sub_factor"]
+pat_params = pat_params.merge(id_mapper[["pat_subject_id","pat_sub_factor"]],on="pat_sub_factor")
+pat_params = pat_params.rename({"pat_subject_id":"subject_id"},axis=1)
+pat_params = pat_params[~pat_params.subject_id.isin(to_exclude)]
+pat_params = pat_params.drop_duplicates()
+pat_params = pat_params.rename({"pat_sub_factor":"patient_factor"},axis=1)
+
+ctrl_params = fit_params[fit_params.group == "CTRL"]
+ctrl_params["ctrl_sub_factor"] = ctrl_params["sub_factor"]
+ctrl_params = ctrl_params.merge(id_mapper[["ctrl_subject_id","ctrl_sub_factor","pat_sub_factor"]],on="ctrl_sub_factor").drop(["ctrl_sub_factor"],axis=1)
+ctrl_params = ctrl_params.rename({"ctrl_subject_id":"subject_id"},axis=1)
+ctrl_params = ctrl_params[~ctrl_params.subject_id.isin(to_exclude)]
+ctrl_params = ctrl_params.drop_duplicates()
+ctrl_params = ctrl_params.rename({"pat_sub_factor":"patient_factor"},axis=1)
+
+fit_params = pd.concat([pat_params,ctrl_params]).reset_index(drop=True)
+fit_params["group_coded"] = fit_params["group"].replace({"PAT":-0.5,"CTRL":0.5})
+fit_params = fit_params.merge(scored_ccas[["ds_bwd","subject_id"]],on="subject_id")
+```
+
+### Alpha
+```{python}
+alpha_params = fit_params[fit_params.param == "alpha"]
+```
+
+```{r}
+py$alpha_params["ds_bwd"] = as.vector(scale(py$alpha_params$ds_bwd))
+alpha_m = stan_lmer(mean ~ group_coded + ds_bwd + (group_coded | patient_factor), data = py$alpha_params)
+alpha_table = data.frame(summary(alpha_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+alpha_table = r.alpha_table
+alpha_table["effect"] = alpha_table.index
+alpha_table.to_csv(os.path.join(r.outdir,"alpha_stat_effects.csv"))
+```
+
+### Cue 1 Button Bias
+```{python}
+beta1_params = fit_params[fit_params.param == "beta[1]"]
+```
+
+```{r}
+py$beta1_params["ds_bwd"] = as.vector(scale(py$beta1_params$ds_bwd))
+beta1_m = stan_lmer(mean ~ group_coded + ds_bwd + (group_coded | patient_factor), data = py$beta1_params)
+beta1_table = data.frame(summary(beta1_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+beta1_table = r.beta1_table
+beta1_table["effect"] = beta1_table.index
+beta1_table.to_csv(os.path.join(r.outdir,"bias1_stat_effects.csv"))
+```
+
+### Cue 2 Button Bias
+```{python}
+beta2_params = fit_params[fit_params.param == "beta[2]"]
+```
+
+```{r}
+py$beta2_params["ds_bwd"] = as.vector(scale(py$beta2_params$ds_bwd))
+beta2_m = stan_lmer(mean ~ group_coded + ds_bwd + (group_coded | patient_factor), data = py$beta2_params)
+beta2_table = data.frame(summary(beta2_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+beta2_table = r.beta2_table
+beta2_table["effect"] = beta2_table.index
+beta2_table.to_csv(os.path.join(r.outdir,"bias2_stat_effects.csv"))
+```
+
+### Cue 1 Deck Sensitivity
+```{python}
+beta3_params = fit_params[fit_params.param == "beta[3]"]
+```
+
+```{r}
+py$beta3_params["ds_bwd"] = as.vector(scale(py$beta3_params$ds_bwd))
+beta3_m = stan_lmer(mean ~ group_coded + ds_bwd + (group_coded | patient_factor), data = py$beta3_params)
+beta3_table = data.frame(summary(beta3_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+beta3_table = r.beta3_table
+beta3_table["effect"] = beta3_table.index
+beta3_table.to_csv(os.path.join(r.outdir,"sensitivity1_stat_effects.csv"))
+```
+
+### Cue 2 Deck Sensitivity
+```{python}
+beta4_params = fit_params[fit_params.param == "beta[4]"]
+```
+
+```{r}
+py$beta4_params["ds_bwd"] = as.vector(scale(py$beta4_params$ds_bwd))
+beta4_m = stan_lmer(mean ~ group_coded + ds_bwd + (group_coded | patient_factor), data = py$beta4_params)
+beta4_table = data.frame(summary(beta4_m, probs=c(0.975,0.025,0.9,0.1),digits=3))
+```
+
+```{python}
+beta4_table = r.beta4_table
+beta4_table["effect"] = beta4_table.index
+beta4_table.to_csv(os.path.join(r.outdir,"sensitivity2_stat_effects.csv"))
+```
+
+# Load and save the ELPD LOO performance for each model/subject
+
+```{r}
+model_names = c("rand","rw")
+cdf_df = data.frame()
+for (s in 1:17) {
+  loo1 = readRDS(sprintf("%srand_ss_pat_%s_loo.rds",paramdir,s))
+  loo2 = readRDS(sprintf("%srw_ss_pat_%s_loo.rds",paramdir,s))
+
+  loo_list = list(loo1,loo2)
+
+  # Perform comparison and create dataframe
+  comp = loo_compare(loo_list)
+  cdf = as.data.frame(comp)
+  cdf$model = rownames(cdf)
+  cdf = cdf[order(cdf$model),]
+  cdf$model_name = model_names
+  cdf = cdf[order(-cdf$elpd_diff),]
+  cdf$group = "PAT"
+  cdf$sub_factor = s
+  cdf_df = rbind(cdf_df,cdf)
+}
+for (s in 1:51) {
+  loo1 = readRDS(sprintf("%srand_ss_ctrl_%s_loo.rds",paramdir,s))
+  loo2 = readRDS(sprintf("%srw_ss_ctrl_%s_loo.rds",paramdir,s))
+
+  loo_list = list(loo1,loo2)
+
+  # Perform comparison and create dataframe
+  comp = loo_compare(loo_list)
+  cdf = as.data.frame(comp)
+  cdf$model = rownames(cdf)
+  cdf = cdf[order(cdf$model),]
+  cdf$model_name = model_names
+  cdf = cdf[order(-cdf$elpd_diff),]
+  cdf$group = "CTRL"
+  cdf$sub_factor = s
+  cdf_df = rbind(cdf_df,cdf)
+
+}
+rownames(cdf_df) <- 1:nrow(cdf_df)
+
+```
+
+```{python}
+elpds = r.cdf_df.groupby(["group","sub_factor","model_name"])["elpd_loo"].mean().reset_index(name="elpd")
+elpds_ctrl = elpds[elpds.group == "CTRL"]
+elpds_pat = elpds[elpds.group == "PAT"]
+elpd_diff_ctrl = (np.array(np.abs(elpds_ctrl[elpds_ctrl.model_name == "rw"]["elpd"])) - np.array(np.abs(elpds_ctrl[elpds_ctrl.model_name == "rand"]["elpd"])))*-1
+elpd_diff_pat = (np.array(np.abs(elpds_pat[elpds_pat.model_name == "rw"]["elpd"])) - np.array(np.abs(elpds_pat[elpds_pat.model_name == "rand"]["elpd"])))*-1
+elpd_diffs = pd.DataFrame.from_dict({"elpd_diff":[i for j in [elpd_diff_ctrl,elpd_diff_pat] for i in j],
+                                     "group":[i for j in [["CTRL"]*len(elpd_diff_ctrl),["PAT"]*len(elpd_diff_pat)] for i in j],
+                                     "sub_factor":elpds[elpds.model_name == "rw"]["sub_factor"]})
+
+pat_elpd_diffs = elpd_diffs[elpd_diffs.group == "PAT"]
+pat_elpd_diffs["pat_sub_factor"] = pat_elpd_diffs["sub_factor"]
+pat_elpd_diffs = pat_elpd_diffs.merge(id_mapper[["pat_subject_id","pat_sub_factor"]],on="pat_sub_factor")
+pat_elpd_diffs = pat_elpd_diffs.rename({"pat_subject_id":"subject_id"},axis=1)
+pat_elpd_diffs = pat_elpd_diffs[~pat_elpd_diffs.subject_id.isin(to_exclude)]
+pat_elpd_diffs = pat_elpd_diffs.drop_duplicates()
+pat_elpd_diffs = pat_elpd_diffs.rename({"pat_sub_factor":"patient_factor"},axis=1)
+
+ctrl_elpd_diffs = elpd_diffs[elpd_diffs.group == "CTRL"]
+ctrl_elpd_diffs["ctrl_sub_factor"] = ctrl_elpd_diffs["sub_factor"]
+ctrl_elpd_diffs = ctrl_elpd_diffs.merge(id_mapper[["ctrl_subject_id","ctrl_sub_factor","pat_sub_factor"]],on="ctrl_sub_factor").drop(["ctrl_sub_factor"],axis=1)
+ctrl_elpd_diffs = ctrl_elpd_diffs.rename({"ctrl_subject_id":"subject_id"},axis=1)
+ctrl_elpd_diffs = ctrl_elpd_diffs[~ctrl_elpd_diffs.subject_id.isin(to_exclude)]
+ctrl_elpd_diffs = ctrl_elpd_diffs.drop_duplicates()
+ctrl_elpd_diffs = ctrl_elpd_diffs.rename({"pat_sub_factor":"patient_factor"},axis=1)
+
+
+elpd_diffs = pd.concat([pat_elpd_diffs,ctrl_elpd_diffs]).reset_index(drop=True)
+elpd_diffs["group_coded"] = elpd_diffs["group"].replace({"PAT":-0.5,"CTRL":0.5})
+```
+
+```{python}
+r.cdf_df.to_csv(os.path.join(r.outdir,"rm_model_loo_df.csv"))
+elpd_diffs.to_csv(os.path.join(r.outdir,"rm_elpd_diffs.csv"))
+```
